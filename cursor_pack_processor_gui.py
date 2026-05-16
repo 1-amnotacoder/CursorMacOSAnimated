@@ -118,9 +118,9 @@ class CursorProcessor:
                 output_path, error = self.stack_frames(cursor_folder, output_dir, fps, scale)
                 
                 if error:
-                    results.append(f"❌ {cursor_name}: {error}")
+                    results.append(f"FAIL {cursor_name}: {error}")
                 else:
-                    results.append(f"✅ {cursor_name}: {output_path.name}")
+                    results.append(f"OK {cursor_name}: {output_path.name}")
             
             # Cleanup temp directory
             shutil.rmtree(temp_dir)
@@ -141,7 +141,7 @@ class CursorProcessorGUI:
     def create_layout(self):
         """Create the GUI layout"""
         layout = [
-            [sg.Text('🖱️  Mousecape Cursor Pack Processor', font=('Arial', 14, 'bold'))],
+            [sg.Text('Mousecape Cursor Pack Processor', font=('Arial', 14, 'bold'))],
             [sg.Text('_' * 60)],
             
             # File Selection Section
@@ -179,7 +179,7 @@ class CursorProcessorGUI:
              sg.Button('Clear', size=(10, 1)),
              sg.Button('Exit', size=(10, 1))],
             
-            [sg.Text('Made with ❤️  for macOS cursor designers', 
+            [sg.Text('Made with love for macOS cursor designers', 
                     font=('Arial', 8), text_color='gray')]
         ]
         return layout
@@ -250,20 +250,19 @@ class CursorProcessorGUI:
             
             # Update UI
             if error:
-                self.window['output_text'].update(f"❌ ERROR: {error}", append=True)
+                self.window['output_text'].update(f"ERROR: {error}", append=True)
             else:
                 self.window['progress_bar'].update(100)
                 output_msg = '\n'.join([f"  {r}" for r in results])
                 self.window['output_text'].update(
-                    f"\n✅ Processing Complete!\n\nGenerated cursors:\n{output_msg}\n\n" +
-                    f"📁 Output: {final_output}",
+                    f"\nProcessing Complete!\n\nGenerated cursors:\n{output_msg}\n\nOutput: {final_output}",
                     append=True
                 )
-                sg.popup_ok(f'✅ Successfully processed!\n\nOutput saved to:\n{final_output}',
+                sg.popup_ok(f'Successfully processed!\n\nOutput saved to:\n{final_output}',
                            title='Success')
         
         except Exception as e:
-            self.window['output_text'].update(f"❌ ERROR: {str(e)}", append=True)
+            self.window['output_text'].update(f"ERROR: {str(e)}", append=True)
             sg.popup_error(f'Error: {str(e)}')
         
         finally:
