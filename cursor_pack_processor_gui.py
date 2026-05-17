@@ -6,6 +6,9 @@ Processes cursor animation frames and generates Mousecape-compatible packs
 This updated version fixes a Tk/Tcl threading issue by ensuring all GUI updates
 are performed on the main thread. Worker threads post events to the GUI thread
 using `window.write_event_value` which is thread-safe.
+
+It also now searches the extracted ZIP recursively for directories that contain
+PNG files, so ZIPs that wrap folders (or include __MACOSX) are handled.
 """
 
 import os
@@ -105,19 +108,49 @@ class CursorProcessor:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
             
-            # Find cursor folders
-            cursor_folders = [d for d in temp_dir.iterdir() if d.is_dir()]
+            # Find all directories that contain PNG files (recursively), ignore macOS metadata
+            cursor_folders = []
+            # Check if PNGs are directly at the root of the extracted temp_dir
+            try:
+                if any(p.suffix.lower() == '.png' for p in temp_dir.iterdir() if p.is_file()):
+                    cursor_folders.append(temp_dir)
+            except PermissionError:
+                pass
+            
+            for d in temp_dir.rglob('*'):
+                if not d.is_dir():
+                    continue
+                # skip __MACOSX and hidden dirs
+                if d.name.startswith('__MACOSX') or d.name.startswith('.'):
+                    continue
+                try:
+                    if any(p.suffix.lower() == '.png' for p in d.iterdir() if p.is_file()):
+                        cursor_folders.append(d)
+                except PermissionError:
+                    continue
+            
+            # Remove duplicates while preserving order and sort for deterministic output
+            seen = set()
+            ordered = []
+            for p in cursor_folders:
+                s = str(p.resolve())
+                if s not in seen:
+                    seen.add(s)
+                    ordered.append(p)
+            cursor_folders = sorted(ordered, key=lambda p: str(p))
             total_cursors = len(cursor_folders)
             
             if not cursor_folders:
-                return None, f"No cursor folders found in ZIP"
+                # Cleanup temp directory
+                shutil.rmtree(temp_dir)
+                return None, f"No cursor folders containing PNGs were found in the ZIP"
             
             results = []
-            for idx, cursor_folder in enumerate(sorted(cursor_folders)):
+            for idx, cursor_folder in enumerate(cursor_folders):
                 cursor_name = cursor_folder.name
-                
+                percent = int(((idx) / max(1, total_cursors)) * 100)
                 if progress_callback:
-                    progress_callback(int((idx / total_cursors) * 100), f"Processing: {cursor_name}")
+                    progress_callback(percent, f"Processing: {cursor_name}")
                 
                 output_path, error = self.stack_frames(cursor_folder, output_dir, fps, scale)
                 
@@ -163,7 +196,7 @@ class CursorProcessorGUI:
             # Settings Section
             [sg.Text('ANIMATION SETTINGS', font=('Arial', 11, 'bold'))],
             [sg.Text('Frames Per Second (FPS):'),
-             sg.Spin(values=list(range(1, 61)), default_value=24, size=(5, 1), key='fps'),
+             sg.Spin(values=list(range(1, 61)), initial_value=24, size=(5, 1), key='fps'),
              sg.Text('  Scale:'),
              sg.Combo(['1x (Original)', '2x (2x Size)', '0.5x (Half)'], 
                      default_value='1x (Original)', key='scale', readonly=True)],
