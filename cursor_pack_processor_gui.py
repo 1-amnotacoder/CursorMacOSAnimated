@@ -2,6 +2,10 @@
 """
 Mousecape Cursor Pack Processor - PySimpleGUI Edition
 Processes cursor animation frames and generates Mousecape-compatible packs
+
+This updated version fixes a Tk/Tcl threading issue by ensuring all GUI updates
+are performed on the main thread. Worker threads post events to the GUI thread
+using `window.write_event_value` which is thread-safe.
 """
 
 import os
@@ -195,6 +199,19 @@ class CursorProcessorGUI:
         while True:
             event, values = self.window.read(timeout=100)
             
+            # Handle progress events posted from worker threads
+            if event == '-PROGRESS-':
+                pct, msg = values[event]
+                # Update GUI elements on main thread only
+                try:
+                    self.window['progress_bar'].update(pct)
+                    current_text = self.window['output_text'].get()
+                    self.window['output_text'].update(current_text + f"\n{msg}")
+                    self.window.refresh()
+                except Exception:
+                    pass
+                continue
+            
             if event == sg.WINDOW_CLOSED or event == 'Exit':
                 break
             
@@ -233,12 +250,14 @@ class CursorProcessorGUI:
             final_output = Path(output_dir) / f"{base_name}_processed"
             final_output.mkdir(parents=True, exist_ok=True)
             
-            # Process
+            # Define a thread-safe progress poster that writes an event to the GUI
             def progress_update(percent, message):
-                self.window['progress_bar'].update(percent)
-                current_text = self.window['output_text'].get()
-                self.window['output_text'].update(current_text + f'\n{message}')
-                self.window.refresh()
+                # Post a custom event to the main GUI thread; write_event_value is thread-safe
+                try:
+                    self.window.write_event_value('-PROGRESS-', (percent, message))
+                except Exception:
+                    # If window is closed or unavailable, ignore
+                    pass
             
             results, error = self.processor.process_zip(
                 zip_file, 
@@ -248,25 +267,30 @@ class CursorProcessorGUI:
                 progress_update
             )
             
-            # Update UI
+            # Final update
             if error:
-                self.window['output_text'].update(f"ERROR: {error}", append=True)
+                self.window.write_event_value('-PROGRESS-', (100, f"ERROR: {error}"))
             else:
-                self.window['progress_bar'].update(100)
+                self.window.write_event_value('-PROGRESS-', (100, "Processing Complete!"))
                 output_msg = '\n'.join([f"  {r}" for r in results])
-                self.window['output_text'].update(
-                    f"\nProcessing Complete!\n\nGenerated cursors:\n{output_msg}\n\nOutput: {final_output}",
-                    append=True
-                )
-                sg.popup_ok(f'Successfully processed!\n\nOutput saved to:\n{final_output}',
-                           title='Success')
+                self.window.write_event_value('-PROGRESS-', (100, f"Generated cursors:\n{output_msg}\nOutput: {final_output}"))
+                self.window.write_event_value('-PROGRESS-', (100, "__DONE__"))
+                self.window.write_event_value('-PROCESSED_PATH-', str(final_output))
+                self.window.write_event_value('-FINISHED-', True)
         
         except Exception as e:
-            self.window['output_text'].update(f"ERROR: {str(e)}", append=True)
-            sg.popup_error(f'Error: {str(e)}')
+            try:
+                self.window.write_event_value('-PROGRESS-', (100, f"ERROR: {str(e)}"))
+                self.window.write_event_value('-FINISHED-', True)
+            except Exception:
+                pass
         
         finally:
-            self.window['Process Cursor Pack'].update(disabled=False)
+            # Re-enable the button on the main thread
+            try:
+                self.window.write_event_value('-ENABLE_BUTTON-', True)
+            except Exception:
+                pass
 
 
 def main():
