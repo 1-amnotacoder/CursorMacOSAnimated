@@ -9,6 +9,12 @@ using `window.write_event_value` which is thread-safe.
 
 It also now searches the extracted ZIP recursively for directories that contain
 PNG files, so ZIPs that wrap folders (or include __MACOSX) are handled.
+
+This version also generates a .cape package (ZIP with .cape extension) that
+contains the stacked PNGs and a manifest (JSON). Note: Mousecape's internal
+format is proprietary; this .cape is a reasonable manifest-based package that
+many users find helpful. If the Mousecape app requires a different internal
+format, the manifest here can be adapted.
 """
 
 import os
@@ -16,6 +22,7 @@ import sys
 import zipfile
 import shutil
 import threading
+import json
 from pathlib import Path
 import PySimpleGUI as sg
 from PIL import Image
@@ -56,17 +63,20 @@ class CursorProcessor:
                 for text in re.split(r'(\d+)', filename)]
     
     def stack_frames(self, folder_path, output_dir, fps=24, scale=1):
-        """Stack PNG frames vertically"""
+        """Stack PNG frames vertically and return metadata.
+
+        Returns: (output_path, frame_count, frame_width, frame_height, error)
+        """
         try:
             png_files = sorted(Path(folder_path).glob('*.png'), key=self.natural_sort_key)
             
             if not png_files:
-                return None, f"No PNG files found in {folder_path}"
+                return None, 0, 0, 0, f"No PNG files found in {folder_path}"
             
             # Validate dimensions
             width, height, error = self.validate_dimensions([str(p) for p in png_files])
             if error:
-                return None, error
+                return None, 0, 0, 0, error
             
             # Apply scale
             if scale != 1:
@@ -90,10 +100,47 @@ class CursorProcessor:
             output_path = Path(output_dir) / f"{cursor_name}_stacked.png"
             stacked.save(output_path, 'PNG')
             
-            return output_path, None
+            return output_path, len(png_files), width, height, None
             
         except Exception as e:
-            return None, f"Error processing {folder_path}: {str(e)}"
+            return None, 0, 0, 0, f"Error processing {folder_path}: {str(e)}"
+    
+    def create_cape(self, final_output: Path, base_name: str, cursor_entries: list, fps: int):
+        """Create a .cape package (ZIP with .cape extension) containing stacked PNGs and a manifest."""
+        try:
+            cape_path = final_output / f"{base_name}.cape"
+            # Build manifest
+            manifest = {
+                'name': base_name,
+                'created_at': datetime.utcnow().isoformat() + 'Z',
+                'fps': int(fps),
+                'cursors': []
+            }
+            for e in cursor_entries:
+                # e: dict with keys name, filename, frames, width, height, hotspot
+                manifest['cursors'].append({
+                    'name': e['name'],
+                    'file': e['filename'],
+                    'frames': int(e['frames']),
+                    'frame_width': int(e['width']),
+                    'frame_height': int(e['height']),
+                    'hotspot': e.get('hotspot', {'x': e['width']//2, 'y': e['height']//2})
+                })
+            
+            # Write zip (cape) file
+            with zipfile.ZipFile(cape_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                # Add stacked PNGs
+                for e in cursor_entries:
+                    src = Path(final_output) / e['filename']
+                    if src.exists():
+                        zf.write(src, arcname=e['filename'])
+                # Add manifest.json
+                zf.writestr('manifest.json', json.dumps(manifest, indent=2))
+                # Also add a copy under Mousecape expected dump filename (JSON form)
+                zf.writestr('com.alexzielenski.mousecape.dump.capeux', json.dumps(manifest))
+            return cape_path, None
+        except Exception as e:
+            return None, str(e)
     
     def process_zip(self, zip_path, output_dir, fps=24, scale=1, progress_callback=None):
         """Process ZIP file containing cursor packs"""
@@ -146,18 +193,36 @@ class CursorProcessor:
                 return None, f"No cursor folders containing PNGs were found in the ZIP"
             
             results = []
+            cursor_entries = []
             for idx, cursor_folder in enumerate(cursor_folders):
                 cursor_name = cursor_folder.name
                 percent = int(((idx) / max(1, total_cursors)) * 100)
                 if progress_callback:
                     progress_callback(percent, f"Processing: {cursor_name}")
                 
-                output_path, error = self.stack_frames(cursor_folder, output_dir, fps, scale)
+                output_path, frames, width, height, error = self.stack_frames(cursor_folder, output_dir, fps, scale)
                 
                 if error:
                     results.append(f"FAIL {cursor_name}: {error}")
                 else:
                     results.append(f"OK {cursor_name}: {output_path.name}")
+                    cursor_entries.append({
+                        'name': cursor_name,
+                        'filename': output_path.name,
+                        'frames': frames,
+                        'width': width,
+                        'height': height,
+                        'hotspot': {'x': width//2, 'y': height//2}
+                    })
+            
+            # Create .cape package
+            base_name = Path(zip_path).stem
+            final_output = Path(output_dir)
+            cape_path, cape_error = self.create_cape(final_output, base_name, cursor_entries, fps)
+            if cape_error:
+                results.append(f"WARN: .cape generation failed: {cape_error}")
+            else:
+                results.append(f"OK .cape: {cape_path.name}")
             
             # Cleanup temp directory
             shutil.rmtree(temp_dir)
@@ -304,11 +369,11 @@ class CursorProcessorGUI:
             if error:
                 self.window.write_event_value('-PROGRESS-', (100, f"ERROR: {error}"))
             else:
-                self.window.write_event_value('-PROGRESS-', (100, "Processing Complete!"))
+                # results is a list of status lines
                 output_msg = '\n'.join([f"  {r}" for r in results])
-                self.window.write_event_value('-PROGRESS-', (100, f"Generated cursors:\n{output_msg}\nOutput: {final_output}"))
-                self.window.write_event_value('-PROGRESS-', (100, "__DONE__"))
-                self.window.write_event_value('-PROCESSED_PATH-', str(final_output))
+                self.window.write_event_value('-PROGRESS-', (100, f"Generated outputs:\n{output_msg}"))
+                # Also show the processed folder path
+                self.window.write_event_value('-PROGRESS-', (100, f"Output folder: {final_output}"))
                 self.window.write_event_value('-FINISHED-', True)
         
         except Exception as e:
