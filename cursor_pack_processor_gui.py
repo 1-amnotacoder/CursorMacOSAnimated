@@ -15,6 +15,13 @@ contains the stacked PNGs and a manifest (JSON). Note: Mousecape's internal
 format is proprietary; this .cape is a reasonable manifest-based package that
 many users find helpful. If the Mousecape app requires a different internal
 format, the manifest here can be adapted.
+
+New features in this commit:
+- Configurable target frames per stacked image (default 23)
+- Padding modes: repeat first (default), repeat last, mirror
+- Preview pane showing the stacked image (updates during processing)
+- When padding, filler frames are generated from existing frames (by default the first frame)
+- Stack images are square: each frame is resized to (frame_width, frame_width) so final height = frame_width * target_frames
 """
 
 import os
@@ -40,21 +47,6 @@ class CursorProcessor:
         self.processing = False
         self.window = None
         
-    def validate_dimensions(self, images):
-        """Check all images have same dimensions"""
-        if not images:
-            return None, None, None
-        
-        first = Image.open(images[0])
-        width, height = first.size
-        
-        for img_path in images[1:]:
-            img = Image.open(img_path)
-            if img.size != (width, height):
-                return None, None, f"Image size mismatch: {img_path} is {img.size}, expected {(width, height)}"
-        
-        return width, height, None
-    
     def natural_sort_key(self, path):
         """Sort paths with natural number ordering (frame_1, frame_2, ..., frame_10)"""
         import re
@@ -62,45 +54,71 @@ class CursorProcessor:
         return [int(text) if text.isdigit() else text.lower() 
                 for text in re.split(r'(\d+)', filename)]
     
-    def stack_frames(self, folder_path, output_dir, fps=24, scale=1):
+    def stack_frames(self, folder_path, output_dir, target_frames=23, padding_mode='repeat_first', scale=1):
         """Stack PNG frames vertically and return metadata.
+
+        Frames are resized to square (frame_width x frame_width) where frame_width is
+        the width of the first image in the folder. Final stacked image size is
+        (frame_width, frame_width * target_frames).
 
         Returns: (output_path, frame_count, frame_width, frame_height, error)
         """
         try:
-            png_files = sorted(Path(folder_path).glob('*.png'), key=self.natural_sort_key)
+            # Get PNG files, ignore AppleDouble files (._*)
+            png_files = sorted([p for p in Path(folder_path).glob('*.png') if not p.name.startswith('._')], key=self.natural_sort_key)
             
             if not png_files:
                 return None, 0, 0, 0, f"No PNG files found in {folder_path}"
             
-            # Validate dimensions
-            width, height, error = self.validate_dimensions([str(p) for p in png_files])
-            if error:
-                return None, 0, 0, 0, error
+            # Determine base width from first image
+            first_img = Image.open(png_files[0])
+            base_width = first_img.size[0]
+            frame_size = int(base_width)  # square frames: width x width
             
-            # Apply scale
-            if scale != 1:
-                width = int(width * scale)
-                height = int(height * scale)
+            # Build sequence of frames according to target_frames and padding_mode
+            n = len(png_files)
+            frames_seq = [p for p in png_files]
+
+            if n >= target_frames:
+                frames_seq = frames_seq[:target_frames]
+            else:
+                needed = target_frames - n
+                if padding_mode == 'repeat_first':
+                    fillers = [png_files[0]] * needed
+                    frames_seq.extend(fillers)
+                elif padding_mode == 'repeat_last':
+                    fillers = [png_files[-1]] * needed
+                    frames_seq.extend(fillers)
+                elif padding_mode == 'mirror':
+                    # mirror the sequence (excluding last to avoid immediate duplicate)
+                    mirror = list(reversed(png_files))
+                    # append mirror frames repeatedly until we reach target
+                    i = 0
+                    while len(frames_seq) < target_frames:
+                        frames_seq.append(mirror[i % len(mirror)])
+                        i += 1
+                else:
+                    # fallback to repeat_first
+                    fillers = [png_files[0]] * needed
+                    frames_seq.extend(fillers)
+
+            # Create stacked image: width x (width * target_frames)
+            stacked_height = frame_size * target_frames
+            stacked = Image.new('RGBA', (frame_size, stacked_height), (0, 0, 0, 0))
             
-            # Create stacked image
-            stacked_height = height * len(png_files)
-            stacked = Image.new('RGBA', (width, stacked_height), (0, 0, 0, 0))
-            
-            for i, png_file in enumerate(png_files):
+            for i, png_file in enumerate(frames_seq):
                 frame = Image.open(png_file).convert('RGBA')
-                
-                if scale != 1:
-                    frame = frame.resize((width, height), Image.Resampling.LANCZOS)
-                
-                stacked.paste(frame, (0, i * height), frame)
+                # Resize each frame to square frame_size x frame_size
+                if frame.size != (frame_size, frame_size):
+                    frame = frame.resize((frame_size, frame_size), Image.Resampling.LANCZOS)
+                stacked.paste(frame, (0, i * frame_size), frame)
             
             # Save stacked image
             cursor_name = Path(folder_path).name
             output_path = Path(output_dir) / f"{cursor_name}_stacked.png"
             stacked.save(output_path, 'PNG')
             
-            return output_path, len(png_files), width, height, None
+            return output_path, target_frames, frame_size, frame_size, None
             
         except Exception as e:
             return None, 0, 0, 0, f"Error processing {folder_path}: {str(e)}"
@@ -142,7 +160,7 @@ class CursorProcessor:
         except Exception as e:
             return None, str(e)
     
-    def process_zip(self, zip_path, output_dir, fps=24, scale=1, progress_callback=None):
+    def process_zip(self, zip_path, output_dir, fps=24, scale=1, progress_callback=None, target_frames=23, padding_mode='repeat_first'):
         """Process ZIP file containing cursor packs"""
         try:
             # Create temp extraction directory
@@ -159,7 +177,7 @@ class CursorProcessor:
             cursor_folders = []
             # Check if PNGs are directly at the root of the extracted temp_dir
             try:
-                if any(p.suffix.lower() == '.png' for p in temp_dir.iterdir() if p.is_file()):
+                if any(p.suffix.lower() == '.png' and not p.name.startswith('._') for p in temp_dir.iterdir() if p.is_file()):
                     cursor_folders.append(temp_dir)
             except PermissionError:
                 pass
@@ -167,11 +185,14 @@ class CursorProcessor:
             for d in temp_dir.rglob('*'):
                 if not d.is_dir():
                     continue
-                # skip __MACOSX and hidden dirs
-                if d.name.startswith('__MACOSX') or d.name.startswith('.'):
+                # Skip any directory that contains a __MACOSX component anywhere in its path
+                if any(part == '__MACOSX' for part in d.parts):
+                    continue
+                # skip hidden dirs
+                if d.name.startswith('.'):
                     continue
                 try:
-                    if any(p.suffix.lower() == '.png' for p in d.iterdir() if p.is_file()):
+                    if any(p.suffix.lower() == '.png' and not p.name.startswith('._') for p in d.iterdir() if p.is_file()):
                         cursor_folders.append(d)
                 except PermissionError:
                     continue
@@ -200,7 +221,7 @@ class CursorProcessor:
                 if progress_callback:
                     progress_callback(percent, f"Processing: {cursor_name}")
                 
-                output_path, frames, width, height, error = self.stack_frames(cursor_folder, output_dir, fps, scale)
+                output_path, frames, width, height, error = self.stack_frames(cursor_folder, output_dir, target_frames=target_frames, padding_mode=padding_mode, scale=scale)
                 
                 if error:
                     results.append(f"FAIL {cursor_name}: {error}")
@@ -214,6 +235,9 @@ class CursorProcessor:
                         'height': height,
                         'hotspot': {'x': width//2, 'y': height//2}
                     })
+                    # Ask GUI to preview this stacked image (special sentinel via progress callback)
+                    if progress_callback:
+                        progress_callback(percent, f"__PREVIEW__:{output_path}")
             
             # Create .cape package
             base_name = Path(zip_path).stem
@@ -265,12 +289,17 @@ class CursorProcessorGUI:
              sg.Text('  Scale:'),
              sg.Combo(['1x (Original)', '2x (2x Size)', '0.5x (Half)'], 
                      default_value='1x (Original)', key='scale', readonly=True)],
+            # New stack settings
+            [sg.Text('Stack target:'),
+             sg.Spin(values=list(range(1, 129)), initial_value=23, size=(5,1), key='target_frames'),
+             sg.Text('  Padding:'),
+             sg.Combo(['repeat_first', 'repeat_last', 'mirror'], default_value='repeat_first', key='padding_mode', readonly=True)],
             
             [sg.Text('_' * 60)],
             
-            # Progress Section
+            # Progress + Preview Section
             [sg.Text('PROGRESS', font=('Arial', 11, 'bold'))],
-            [sg.ProgressBar(100, size=(58, 25), key='progress_bar')],
+            [sg.ProgressBar(100, size=(40, 25), key='progress_bar'), sg.Column([[sg.Image(key='preview', size=(200,200))]])],
             [sg.Multiline(size=(62, 10), key='output_text', disabled=True, 
                          background_color='black', text_color='lightgreen')],
             
@@ -300,12 +329,36 @@ class CursorProcessorGUI:
             # Handle progress events posted from worker threads
             if event == '-PROGRESS-':
                 pct, msg = values[event]
+                # If this is a preview sentinel, post a preview event
+                if isinstance(msg, str) and msg.startswith('__PREVIEW__:'):
+                    preview_path = msg.split('__PREVIEW__:',1)[1]
+                    try:
+                        # update preview image (main thread)
+                        self.window['preview'].update(filename=str(preview_path))
+                    except Exception:
+                        pass
+                    continue
                 # Update GUI elements on main thread only
                 try:
                     self.window['progress_bar'].update(pct)
                     current_text = self.window['output_text'].get()
                     self.window['output_text'].update(current_text + f"\n{msg}")
                     self.window.refresh()
+                except Exception:
+                    pass
+                continue
+            
+            if event == '-PREVIEW-':
+                # direct preview event (if used)
+                try:
+                    self.window['preview'].update(filename=str(values[event]))
+                except Exception:
+                    pass
+                continue
+            
+            if event == '-ENABLE_BUTTON-':
+                try:
+                    self.window['Process Cursor Pack'].update(disabled=False)
                 except Exception:
                     pass
                 continue
@@ -317,6 +370,10 @@ class CursorProcessorGUI:
                 self.window['zip_file'].update('')
                 self.window['output_text'].update('')
                 self.window['progress_bar'].update(0)
+                try:
+                    self.window['preview'].update(data=None)
+                except Exception:
+                    pass
             
             if event == 'Process Cursor Pack':
                 if not values['zip_file']:
@@ -326,17 +383,21 @@ class CursorProcessorGUI:
                 # Disable button during processing
                 self.window['Process Cursor Pack'].update(disabled=True)
                 
+                # Read settings
+                target_frames = int(values.get('target_frames', 23))
+                padding_mode = values.get('padding_mode', 'repeat_first')
+                
                 # Run processing in thread
                 thread = threading.Thread(
                     target=self._process_thread,
-                    args=(values['zip_file'], values['output_dir'], values['fps'], values['scale'])
+                    args=(values['zip_file'], values['output_dir'], values['fps'], values['scale'], target_frames, padding_mode)
                 )
                 thread.daemon = True
                 thread.start()
         
         self.window.close()
     
-    def _process_thread(self, zip_file, output_dir, fps, scale):
+    def _process_thread(self, zip_file, output_dir, fps, scale, target_frames, padding_mode):
         """Process ZIP in background thread"""
         try:
             # Parse scale value
@@ -350,8 +411,9 @@ class CursorProcessorGUI:
             
             # Define a thread-safe progress poster that writes an event to the GUI
             def progress_update(percent, message):
-                # Post a custom event to the main GUI thread; write_event_value is thread-safe
+                # Post preview sentinel messages and normal progress messages
                 try:
+                    # write_event_value is thread-safe
                     self.window.write_event_value('-PROGRESS-', (percent, message))
                 except Exception:
                     # If window is closed or unavailable, ignore
@@ -362,7 +424,9 @@ class CursorProcessorGUI:
                 final_output, 
                 fps, 
                 scale_value,
-                progress_update
+                progress_update,
+                target_frames=target_frames,
+                padding_mode=padding_mode
             )
             
             # Final update
